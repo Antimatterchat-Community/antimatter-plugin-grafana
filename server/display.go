@@ -157,7 +157,7 @@ func seriesTitle(base string, s seriesSummary) string {
 	// Leave out the labels a reader doesn't need: the metric's own name, the scrape job, and an instance the
 	// title already names (host_metrics' "CPU on www-1").
 	var kept []string
-	for _, pair := range strings.Split(s.Labels, ", ") {
+	for pair := range strings.SplitSeq(s.Labels, ", ") {
 		key, value, _ := strings.Cut(pair, "=")
 		switch {
 		case key == "__name__", key == "job":
