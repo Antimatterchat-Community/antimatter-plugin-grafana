@@ -218,11 +218,12 @@ func handleSearchDashboards(ctx context.Context, client *grafanaClient, cfg *con
 		return "", err
 	}
 	if len(hits) == 0 {
-		return "No dashboards matched.", nil
+		text := "No dashboards matched."
+		att := &model.MessageAttachment{Fallback: text, AuthorName: "Grafana", Text: text}
+		return encodeResult([]*model.MessageAttachment{att}, text)
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Found %d dashboard(s):\n", len(hits))
-	for _, hit := range hits {
+	rows := make([][]string, len(hits))
+	for i, hit := range hits {
 		folder := hit.FolderTitle
 		if folder == "" {
 			folder = "General"
@@ -233,9 +234,21 @@ func handleSearchDashboards(ctx context.Context, client *grafanaClient, cfg *con
 		} else {
 			link = dashboardLink(cfg.publicURL(), hit.UID, "")
 		}
-		fmt.Fprintf(&b, "- %s (uid: %s, folder: %s) %s\n", hit.Title, hit.UID, folder, link)
+		cell := ""
+		if safe := safeHTTPLink(link); safe != "" {
+			cell = "[Open](" + safe + ")"
+		}
+		rows[i] = []string{hit.Title, hit.UID, folder, cell}
 	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	summary := fmt.Sprintf("Found %d dashboard(s) matching %q.", len(hits), args.Query)
+	attachment := &model.MessageAttachment{
+		Fallback:   summary,
+		AuthorName: "Grafana",
+		Title:      "Grafana dashboards",
+		Text:       markdownTable([]string{"Title", "UID", "Folder", "Link"}, rows),
+		Footer:     "Grafana",
+	}
+	return encodeResult([]*model.MessageAttachment{attachment}, summary)
 }
 
 type getDashboardArgs struct {
@@ -323,9 +336,10 @@ func handleQueryMetrics(ctx context.Context, client *grafanaClient, cfg *configu
 	if result.Error != "" {
 		return "", fmt.Errorf("grafana: %s", result.Error)
 	}
-	text := formatSeries(args.Expr, summarizeFrames(result.Frames))
-	text += "\nExplore: " + exploreLink(cfg.publicURL(), datasourceUID, args.Expr, from, to)
-	return text, nil
+	series := summarizeFrames(result.Frames)
+	link := exploreLink(cfg.publicURL(), datasourceUID, args.Expr, from, to)
+	attachments, summary := buildMetricAttachments(args.Expr, link, "Grafana · Explore", "", series)
+	return encodeResult(attachments, summary)
 }
 
 type panelDataArgs struct {
@@ -368,24 +382,26 @@ func handlePanelData(ctx context.Context, client *grafanaClient, renderer *rende
 		return "", err
 	}
 
+	unit, scale := grafanaUnitKind(panel.FieldConfig.Defaults.Unit)
 	var series []seriesSummary
 	for _, q := range queries {
 		result := resp.Results[q.RefID]
 		if result.Error != "" {
 			return "", fmt.Errorf("grafana: %s", result.Error)
 		}
-		series = append(series, summarizeFrames(result.Frames)...)
+		for _, s := range summarizeFrames(result.Frames) {
+			series = append(series, scaleSeries(s, scale))
+		}
 	}
-	text := formatSeries(fmt.Sprintf("%s (panel %s)", panel.Title, args.PanelID), series)
-	text += "\nDashboard: " + dashboardLink(cfg.publicURL(), args.DashboardUID, args.PanelID)
-
-	if renderer.isInstalled(ctx, client, time.Now()) {
-		text += "\nRendered panel image: " + renderLink(cfg.publicURL(), args.DashboardUID, args.PanelID, from, to) +
-			" (grafana-image-renderer is installed; open it signed in to Grafana)"
-	} else {
-		text += "\nRendered panel image: not available (grafana-image-renderer isn't installed)"
+	link := dashboardLink(cfg.publicURL(), args.DashboardUID, args.PanelID)
+	footer := "Grafana · " + dash.Dashboard.Title
+	attachments, summary := buildMetricAttachments(panel.Title, link, footer, unit, series)
+	if len(series) > 0 && len(attachments) > 0 && renderer.isInstalled(ctx, client, time.Now()) {
+		if img := safeHTTPLink(renderLink(cfg.publicURL(), args.DashboardUID, args.PanelID, from, to)); img != "" {
+			attachments[0].ImageURL = img
+		}
 	}
-	return text, nil
+	return encodeResult(attachments, summary)
 }
 
 // panelTargetsToQueries turns a panel's own targets into /api/ds/query queries, falling back to
@@ -431,45 +447,37 @@ func handleListAlerts(ctx context.Context, client *grafanaClient, raw json.RawMe
 		rules = filtered
 	}
 	if len(rules) == 0 {
-		return "No matching alert rules.", nil
+		text := "No matching alert rules."
+		att := &model.MessageAttachment{Fallback: text, Color: "good", AuthorName: "Grafana", Text: text}
+		return encodeResult([]*model.MessageAttachment{att}, text)
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d alert rule(s):\n", len(rules))
+
+	firing, pending, inactive := 0, 0, 0
 	for _, r := range rules {
-		fmt.Fprintf(&b, "- %s [%s]: %s", r.Name, r.Group, r.State)
-		if r.Health != "" && r.Health != "ok" {
-			fmt.Fprintf(&b, " (health: %s)", r.Health)
-		}
-		if len(r.Labels) > 0 {
-			fmt.Fprintf(&b, " %s", labelSummary(r.Labels))
-		}
-		b.WriteString("\n")
-	}
-	return strings.TrimRight(b.String(), "\n"), nil
-}
-
-// formatSeries formats a query's series the same way for query_metrics and panel_data.
-func formatSeries(title string, series []seriesSummary) string {
-	var b strings.Builder
-	if len(series) == 0 {
-		return title + ": no data"
-	}
-	fmt.Fprintf(&b, "%s: %d series\n", title, len(series))
-	for _, s := range series {
-		fmt.Fprintf(&b, "- %s: last=%s min=%s max=%s avg=%s\n", s.Labels, formatValue(s.Last), formatValue(s.Min), formatValue(s.Max), formatValue(s.Avg))
-		if len(s.Points) > 0 {
-			points := make([]string, len(s.Points))
-			for i, pt := range s.Points {
-				points[i] = strconv.FormatInt(pt.T, 10) + ":" + formatValue(pt.V)
-			}
-			fmt.Fprintf(&b, "  points: %s\n", strings.Join(points, ", "))
+		switch strings.ToLower(r.State) {
+		case "firing":
+			firing++
+		case "pending":
+			pending++
+		default:
+			inactive++
 		}
 	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func formatValue(v float64) string {
-	return strconv.FormatFloat(v, 'g', 6, 64)
+	shown := rules
+	var more int
+	if len(shown) > maxShownAttachments {
+		more = len(shown) - maxShownAttachments
+		shown = shown[:maxShownAttachments]
+	}
+	attachments := make([]*model.MessageAttachment, 0, len(shown)+1)
+	for _, r := range shown {
+		attachments = append(attachments, alertRuleAttachment(r))
+	}
+	if more > 0 {
+		attachments = append(attachments, moreAttachment(more, "alert rules"))
+	}
+	summary := fmt.Sprintf("%d alert rule(s): %d firing, %d pending, %d inactive.", len(rules), firing, pending, inactive)
+	return encodeResult(attachments, summary)
 }
 
 // timeRangeOrDefault fills in Grafana's own defaults (the last hour) when a tool call doesn't

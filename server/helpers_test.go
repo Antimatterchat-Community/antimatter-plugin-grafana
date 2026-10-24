@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // testToken is the fake service account token used throughout the tests. Every test that
@@ -80,4 +82,27 @@ func newGrafanaFake(t *testing.T, handler func(w http.ResponseWriter, r *http.Re
 	fake := &grafanaFake{Server: httptest.NewServer(http.HandlerFunc(handler))}
 	t.Cleanup(fake.Close)
 	return fake
+}
+
+// decodeToolResult decodes a tool's result (an AIToolResult.Text that must not be an error) as the
+// attachments/summary envelope display.go's handlers encode.
+func decodeToolResult(t *testing.T, result *model.AIToolResult) toolResult {
+	t.Helper()
+	require.Empty(t, result.Error)
+	var out toolResult
+	require.NoError(t, json.Unmarshal([]byte(result.Text), &out), result.Text)
+	return out
+}
+
+// fieldValue gives the string value of one of an attachment's fields, "" when it has none of that
+// title.
+func fieldValue(t *testing.T, a *model.MessageAttachment, title string) string {
+	t.Helper()
+	for _, f := range a.Fields {
+		if f.Title == title {
+			v, _ := f.Value.(string)
+			return v
+		}
+	}
+	return ""
 }

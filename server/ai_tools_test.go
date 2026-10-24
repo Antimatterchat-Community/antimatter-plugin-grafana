@@ -163,12 +163,16 @@ func TestExecuteAIToolQueryMetrics(t *testing.T) {
 	env.expectLogs(nil)
 
 	result := env.p.ExecuteAITool(nil, toolExecution(toolQueryMetrics, "u1", "c1", "", map[string]string{"expr": "rate(node_cpu[5m])"}))
-	require.Empty(t, result.Error)
-	assert.Contains(t, result.Text, "instance=www-1")
-	assert.Contains(t, result.Text, "last=149")
-	assert.Contains(t, result.Text, "min=0")
-	assert.Contains(t, result.Text, "max=149")
-	assert.Contains(t, result.Text, fake.URL+"/explore?left=")
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 1)
+	att := out.Attachments[0]
+	assert.Contains(t, att.Title, "instance=www-1")
+	assert.Equal(t, "149", fieldValue(t, att, "Now"))
+	assert.Equal(t, "0", fieldValue(t, att, "Low"))
+	assert.Equal(t, "149", fieldValue(t, att, "Peak"))
+	assert.Equal(t, fake.URL+"/explore?left=", att.TitleLink[:len(fake.URL+"/explore?left=")])
+	require.NotNil(t, att.Chart)
+	assert.LessOrEqual(t, len(att.Chart.Values), 60)
 	assert.NotContains(t, result.Text, testToken)
 }
 
@@ -214,19 +218,56 @@ func TestExecuteAIToolPanelData(t *testing.T) {
 			env.expectLogs(nil)
 
 			result := env.p.ExecuteAITool(nil, toolExecution(toolPanelData, "u1", "c1", "", map[string]string{"dashboard_uid": "node-www", "panel_id": "2"}))
-			require.Empty(t, result.Error)
-			assert.Contains(t, result.Text, "CPU")
-			assert.Contains(t, result.Text, "last=7")
-			assert.Contains(t, result.Text, fake.URL+"/d/node-www?viewPanel=2")
+			out := decodeToolResult(t, result)
+			require.Len(t, out.Attachments, 1)
+			att := out.Attachments[0]
+			assert.Contains(t, att.Title, "CPU")
+			assert.Equal(t, "7", fieldValue(t, att, "Now"))
+			assert.Equal(t, fake.URL+"/d/node-www?viewPanel=2", att.TitleLink)
 			if tc.wantInstalled {
-				assert.Contains(t, result.Text, "Rendered panel image: "+fake.URL)
-				assert.Contains(t, result.Text, "render/d-solo/node-www")
+				assert.Contains(t, att.ImageURL, fake.URL)
+				assert.Contains(t, att.ImageURL, "render/d-solo/node-www")
 			} else {
-				assert.Contains(t, result.Text, "Rendered panel image: not available")
+				assert.Empty(t, att.ImageURL)
 			}
 			assert.NotContains(t, result.Text, testToken)
 		})
 	}
+}
+
+// TestExecuteAIToolPanelDataUsesPanelUnit checks panel_data reads the panel's own Grafana unit
+// code (fieldConfig.defaults.unit) and formats its result's fields with it, and that a
+// "percentunit" (a 0..1 fraction) is scaled to a percentage before formatting.
+func TestExecuteAIToolPanelDataUsesPanelUnit(t *testing.T) {
+	frame := dsQueryFrame(map[string]string{"instance": "www-1"}, []float64{0, 1000}, []float64{0.25, 0.75})
+	dashboard := `{"dashboard":{"uid":"node-www","title":"Node overview","panels":[
+		{"id":2,"title":"CPU","type":"timeseries","datasource":{"uid":"prometheus"},
+		 "fieldConfig":{"defaults":{"unit":"percentunit"}},
+		 "targets":[{"refId":"A","expr":"cpu"}]}
+	]}}`
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/dashboards/uid/"):
+			_, _ = w.Write([]byte(dashboard))
+		case r.URL.Path == "/api/ds/query":
+			resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{frame}}}}
+			encoded, _ := json.Marshal(resp)
+			_, _ = w.Write(encoded)
+		case r.URL.Path == "/api/plugins":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Fatalf("unexpected request to %s", r.URL.Path)
+		}
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolPanelData, "u1", "c1", "", map[string]string{"dashboard_uid": "node-www", "panel_id": "2"}))
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 1)
+	assert.Equal(t, "75.0%", fieldValue(t, out.Attachments[0], "Now"))
+	assert.Equal(t, "25.0%", fieldValue(t, out.Attachments[0], "Low"))
 }
 
 func TestExecuteAIToolPanelDataUnknownPanel(t *testing.T) {
@@ -260,6 +301,72 @@ func TestExecuteAIToolListAlerts(t *testing.T) {
 	require.Empty(t, firing.Error)
 	assert.Contains(t, firing.Text, "Watchdog")
 	assert.NotContains(t, firing.Text, "InstanceDown")
+}
+
+// TestExecuteAIToolListAlertsMapping checks the attachments list_alerts gives: a rule's state
+// colours the attachment (firing danger, pending amber, inactive green), its severity label
+// shows (defaulting to "info" when it has none), its target and since come from its active
+// alert, and an empty result is a single calm attachment.
+func TestExecuteAIToolListAlertsMapping(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"groups":[{"name":"default","rules":[
+			{"name":"HighCPU","state":"firing","health":"ok","alerts":[
+				{"labels":{"instance":"www-1","severity":"critical"},"annotations":{"summary":"CPU above 90%"},"activeAt":"2026-10-24T17:55:00Z"}
+			]},
+			{"name":"SlowDisk","state":"pending","health":"ok","alerts":[
+				{"labels":{"job":"node"},"annotations":{},"activeAt":"2026-10-24T18:00:00Z"}
+			]},
+			{"name":"Watchdog","state":"inactive","health":"ok"}
+		]}]}}`))
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolListAlerts, "u1", "c1", "", map[string]string{}))
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 3)
+
+	highCPU := out.Attachments[0]
+	assert.Equal(t, "danger", highCPU.Color)
+	assert.Equal(t, "critical", fieldValue(t, highCPU, "Severity"))
+	assert.Equal(t, "www-1", fieldValue(t, highCPU, "Target"))
+	assert.Equal(t, "2026-10-24 17:55 UTC", fieldValue(t, highCPU, "Since"))
+	assert.Equal(t, "CPU above 90%", highCPU.Text)
+
+	slowDisk := out.Attachments[1]
+	assert.Equal(t, "warning", slowDisk.Color)
+	// No severity label defaults to "info", never left blank.
+	assert.Equal(t, "info", fieldValue(t, slowDisk, "Severity"))
+	assert.Equal(t, "node", fieldValue(t, slowDisk, "Target"), "falls back to the job when there's no instance")
+
+	watchdog := out.Attachments[2]
+	assert.Equal(t, "good", watchdog.Color)
+	assert.Equal(t, "info", fieldValue(t, watchdog, "Severity"))
+
+	none := env.p.ExecuteAITool(nil, toolExecution(toolListAlerts, "u1", "c1", "", map[string]string{"state": "bogus-state-matching-nothing"}))
+	noneOut := decodeToolResult(t, none)
+	require.Len(t, noneOut.Attachments, 1)
+	assert.Equal(t, "good", noneOut.Attachments[0].Color)
+}
+
+// TestExecuteAIToolHostMetricsUnsafePublicURLDropped checks an admin-configured public URL that
+// isn't http(s) never reaches the attachment's link.
+func TestExecuteAIToolHostMetricsUnsafePublicURLDropped(t *testing.T) {
+	frame := dsQueryFrame(map[string]string{"instance": "www-1"}, []float64{0, 1000}, []float64{1, 2})
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{frame}}}}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true, GrafanaPublicURL: "javascript:alert(1)"})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "load"}))
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 1)
+	assert.Empty(t, out.Attachments[0].TitleLink, "an unsafe public URL must never reach the attachment's link")
 }
 
 // TestExecuteAIToolCommunityGate checks that a tool call from a community the settings don't
@@ -355,12 +462,15 @@ func TestExecuteAIToolHostMetrics(t *testing.T) {
 	env.expectLogs(nil)
 
 	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "load"}))
-	require.Empty(t, result.Error)
-	assert.Contains(t, result.Text, "Load on www-1 (last hour)")
-	assert.Contains(t, result.Text, "last=2.5")
-	assert.Contains(t, result.Text, "min=1.5")
-	assert.Contains(t, result.Text, "max=2.5")
-	assert.Contains(t, result.Text, "points:")
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 1)
+	att := out.Attachments[0]
+	assert.Contains(t, att.Title, "Load on www-1 (last hour)")
+	assert.Equal(t, "2.5", fieldValue(t, att, "Now"))
+	assert.Equal(t, "1.5", fieldValue(t, att, "Low"))
+	assert.Equal(t, "2.5", fieldValue(t, att, "Peak"))
+	require.NotNil(t, att.Chart)
+	assert.NotEmpty(t, att.Chart.Values)
 	assert.NotContains(t, result.Text, testToken)
 }
 
@@ -443,9 +553,11 @@ func TestExecuteAIToolHostMetricsNodenameFallback(t *testing.T) {
 	env.expectLogs(nil)
 
 	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "web1", "metric": "cpu"}))
-	require.Empty(t, result.Error)
-	assert.Contains(t, result.Text, "CPU on web1 (last hour)")
-	assert.Contains(t, result.Text, "last=20")
+	out := decodeToolResult(t, result)
+	require.Len(t, out.Attachments, 1)
+	att := out.Attachments[0]
+	assert.Contains(t, att.Title, "CPU on web1 (last hour)")
+	assert.Equal(t, "20.0%", fieldValue(t, att, "Now"))
 }
 
 // TestExecuteAIToolHostMetricsJobFilter checks the configured job filter reaches the PromQL for
@@ -512,6 +624,11 @@ func TestExecuteAIToolListHosts(t *testing.T) {
 
 	result := env.p.ExecuteAITool(nil, toolExecution(toolListHosts, "u1", "c1", "", map[string]string{}))
 	require.Empty(t, result.Error)
+	// list_hosts keeps its plain [{"host":...}] shape: the assistant's dictionary reads it
+	// directly, so it must never gain a "display"/"attachments" wrapper like the other tools.
+	assert.True(t, strings.HasPrefix(result.Text, "["), result.Text)
+	assert.NotContains(t, result.Text, "attachments")
+	assert.NotContains(t, result.Text, "summary")
 
 	var entries []struct {
 		Host string `json:"host"`

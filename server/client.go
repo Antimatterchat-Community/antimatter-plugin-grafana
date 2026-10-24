@@ -181,6 +181,14 @@ type panelModel struct {
 	Type       string           `json:"type"`
 	Datasource *datasourceRef   `json:"datasource"`
 	Targets    []map[string]any `json:"targets"`
+	// FieldConfig.Defaults.Unit is Grafana's own unit code for the panel's values (such as
+	// "percent" or "Bps"), when the panel sets one. panel_data uses it (grafanaUnitKind) to
+	// format its result's fields with the right unit, the way Grafana's own dashboard would.
+	FieldConfig struct {
+		Defaults struct {
+			Unit string `json:"unit"`
+		} `json:"defaults"`
+	} `json:"fieldConfig"`
 }
 
 // dashboardModel is a dashboard's own content, as GET /api/dashboards/uid/:uid gives it.
@@ -286,16 +294,22 @@ func (c *grafanaClient) queryDS(ctx context.Context, op string, queries []dsQuer
 // alertRuleInfo is one Grafana-managed alert rule, flattened from the ruler API's groups and
 // files, with its current state.
 type alertRuleInfo struct {
-	Name   string
-	Group  string
-	State  string
-	Health string
-	Labels map[string]string
+	Name        string
+	Group       string
+	State       string
+	Health      string
+	Labels      map[string]string
+	Annotations map[string]string
+	// ActiveAt is when the rule's active alert started, RFC 3339 (Prometheus' rules API own
+	// format), "" when the rule isn't active.
+	ActiveAt string
 }
 
 type rulerAlert struct {
-	Labels map[string]string `json:"labels"`
-	State  string            `json:"state"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	State       string            `json:"state"`
+	ActiveAt    string            `json:"activeAt"`
 }
 
 type rulerRule struct {
@@ -329,6 +343,8 @@ func (c *grafanaClient) listAlertRules(ctx context.Context) ([]alertRuleInfo, er
 			info := alertRuleInfo{Name: rule.Name, Group: group.Name, State: rule.State, Health: rule.Health}
 			if len(rule.Alerts) > 0 {
 				info.Labels = rule.Alerts[0].Labels
+				info.Annotations = rule.Alerts[0].Annotations
+				info.ActiveAt = rule.Alerts[0].ActiveAt
 			}
 			rules = append(rules, info)
 		}

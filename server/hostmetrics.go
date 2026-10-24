@@ -210,7 +210,8 @@ func handleHostMetrics(ctx context.Context, client *grafanaClient, cfg *configur
 	instanceLabel := cfg.instanceLabel()
 	jf := jobMatcher(cfg.jobFilter())
 
-	series, err := runMetricQuery(ctx, client, buildMetricExpr(metric, instanceLabel, hostInstanceMatcher(instanceLabel, args.Host), jf), from, to)
+	expr := buildMetricExpr(metric, instanceLabel, hostInstanceMatcher(instanceLabel, args.Host), jf)
+	series, err := runMetricQuery(ctx, client, expr, from, to)
 	if err != nil {
 		return "", err
 	}
@@ -219,14 +220,30 @@ func handleHostMetrics(ctx context.Context, client *grafanaClient, cfg *configur
 		// The instance label (exactly, or with a port) found nothing: try resolving the host via
 		// node-exporter's nodename instead, whichever one finds series.
 		if instances, resolveErr := resolveInstancesByNodename(ctx, client, instanceLabel, jf, args.Host, from, to); resolveErr == nil && len(instances) > 0 {
-			series, err = runMetricQuery(ctx, client, buildMetricExpr(metric, instanceLabel, exactInstanceMatcher(instanceLabel, instances), jf), from, to)
+			expr = buildMetricExpr(metric, instanceLabel, exactInstanceMatcher(instanceLabel, instances), jf)
+			series, err = runMetricQuery(ctx, client, expr, from, to)
 			if err != nil {
 				return "", err
 			}
 		}
 	}
 
-	return formatSeries(hostMetricTitle(metric, args.Host, from, to), series), nil
+	link := exploreLink(cfg.publicURL(), defaultDatasourceUID, expr, from, to)
+	attachments, summary := buildMetricAttachments(hostMetricTitle(metric, args.Host, from, to), link, "Grafana", hostMetricUnit(metric), series)
+	return encodeResult(attachments, summary)
+}
+
+// hostMetricUnit gives the unit host_metrics' attachment uses for a metric: percent for cpu,
+// memory and disk; bytes_per_second for network; "" (a plain count) for load.
+func hostMetricUnit(metric string) string {
+	switch metric {
+	case metricCPU, metricMemory, metricDisk:
+		return unitPercent
+	case metricNetwork:
+		return unitBytesPerSecond
+	default:
+		return ""
+	}
 }
 
 // runMetricQuery runs one PromQL expression through Grafana's datasource query API and summarizes

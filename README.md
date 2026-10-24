@@ -6,33 +6,43 @@ AI tools, and everything it needs is configured in the System Console.
 
 ## Features
 
-- **search_dashboards {query}**: searches Grafana dashboards by title. Returns each match's title,
-  uid, folder and URL.
+- **search_dashboards {query}**: searches Grafana dashboards by title. Returns a message attachment
+  with a table of each match's title, uid, folder and link.
 - **get_dashboard {uid}**: gives one dashboard's panels, with each panel's title and the queries it
   runs.
 - **query_metrics {expr, datasource_uid?, from?, to?, step?}**: runs a PromQL query through
   Grafana's own datasource query API (`/api/ds/query`), the same one Grafana's dashboards and
-  Explore use. Returns each series' label summary, its last, min, max and avg values, and up to 120
-  downsampled points, plus an Explore link.
+  Explore use. Returns one message attachment per series (its label summary, now/peak/low/average
+  and a sparkline of up to 60 points), capped at 10 with a "+N more" attachment, plus an Explore
+  link.
 - **panel_data {dashboard_uid, panel_id, from?, to?}**: runs one dashboard panel's own queries (not
-  a new one) and returns the same kind of result as query_metrics, plus a dashboard link. Also adds
-  a rendered panel image link when the `grafana-image-renderer` plugin is installed on Grafana
-  (detected and cached for a few minutes); otherwise it says the image isn't available.
+  a new one) and returns the same kind of result as query_metrics, formatted with the panel's own
+  Grafana unit (such as `percent` or `Bps`) when it sets one, plus a dashboard link. Also attaches a
+  rendered panel image when the `grafana-image-renderer` plugin is installed on Grafana (detected
+  and cached for a few minutes).
 - **list_alerts {state?}**: lists Grafana-managed alert rules and their current state (inactive,
-  pending or firing), via Grafana's alerting API.
+  pending or firing), via Grafana's alerting API. Returns one message attachment per rule (state
+  colour, severity defaulting to "info", target and since), capped at 10 with a "+N more"
+  attachment.
 - **host_metrics {host, metric, from?, to?}**: gives one host's CPU, memory, disk, load or network
   usage, building the PromQL itself from node-exporter's own conventions, so nothing (a person or
   the assistant's rules engine) needs to write PromQL just to ask "CPU on www-1". `metric` is one
-  of `cpu`, `memory` (or `mem`, `ram`), `disk`, `load`, `network` (or `traffic`). The host is
-  matched against the **instance label** (exactly, or with a `:<port>` suffix) or, if that finds
-  nothing, node-exporter's **nodename** label (`node_uname_info`), whichever has data; both label
-  names are configurable (below). Returns the same kind of result as `query_metrics` (each series'
-  last, min, max and avg, and up to 120 downsampled points), titled, for instance, "CPU on www-1
-  (last hour)".
+  of `cpu`, `memory` (or `mem`, `ram`), `disk`, `load`, `network` (or `traffic`), formatted as a
+  percentage, a plain count or bytes/second as appropriate. The host is matched against the
+  **instance label** (exactly, or with a `:<port>` suffix) or, if that finds nothing,
+  node-exporter's **nodename** label (`node_uname_info`), whichever has data; both label names are
+  configurable (below). Returns the same kind of result as `query_metrics`, titled, for instance,
+  "CPU on www-1 (last hour)", with an Explore link.
 - **list_hosts {}**: lists the distinct values of the instance and nodename labels, through
   Grafana's datasource resource call (the same route Explore's own label picker uses). Returns a
   plain JSON array, such as `[{"host":"www-1"},{"host":"localhost:9090"}]`: meant to be read by the
-  assistant's dictionary (see below), not by a person.
+  assistant's dictionary (see below), not by a person. Unlike the other tools, it never becomes a
+  message attachment.
+
+`query_metrics`, `panel_data`, `host_metrics`, `search_dashboards` and `list_alerts` give their
+result as `{"attachments": [...], "summary": "..."}`: message attachments, the same card format
+Antimatter's bot posts use, with a plain-text `summary` for screen readers and the card's subtitle.
+`get_dashboard` and `list_hosts` are unchanged, plain text/JSON.
 
 All seven tools only read: none of them changes anything in Grafana. Each checks that the person
 behind the call may use the tools at all (their community is allowed by the setting below) and
