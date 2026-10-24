@@ -2,8 +2,8 @@
     "id": "com.antimatterchat.grafana",
     "name": "Grafana",
     "description": "Gives the assistant and agents read-only tools to look up Grafana dashboards, metrics and alerts.",
-    "homepage_url": "https://github.com/antimatterchat/antimatter-plugin-grafana",
-    "support_url": "https://github.com/antimatterchat/antimatter-plugin-grafana/issues",
+    "homepage_url": "https://github.com/Antimatterchat-Community/antimatter-plugin-grafana",
+    "support_url": "https://github.com/Antimatterchat-Community/antimatter-plugin-grafana/issues",
     "icon_path": "assets/icon.svg",
     "min_server_version": "11.11.0",
     "server": {

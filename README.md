@@ -75,7 +75,7 @@ Set `MM_SERVICESETTINGS_ENABLEDEVELOPER=true` to only build the server for the c
 ## Releases
 
 Pushing a `v*` tag builds the app and publishes it as a
-[GitHub release](https://github.com/AntimatterChat/antimatter-plugin-grafana/releases)
+[GitHub release](https://github.com/Antimatterchat-Community/antimatter-plugin-grafana/releases)
 ([release workflow](.github/workflows/release.yml), using the organisation's shared
 [app release workflow](https://github.com/AntimatterChat/.github/blob/main/.github/workflows/app-release.yml)).
 The version is the tag without its `v`. Tags with a `-`, such as `v1.2.0-rc.1`, are published as
