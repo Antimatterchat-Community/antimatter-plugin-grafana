@@ -154,7 +154,22 @@ func seriesTitle(base string, s seriesSummary) string {
 	if s.Labels == "" || s.Labels == "value" {
 		return base
 	}
-	return base + " — " + s.Labels
+	// Leave out the labels a reader doesn't need: the metric's own name, the scrape job, and an instance the
+	// title already names (host_metrics' "CPU on www-1").
+	var kept []string
+	for _, pair := range strings.Split(s.Labels, ", ") {
+		key, value, _ := strings.Cut(pair, "=")
+		switch {
+		case key == "__name__", key == "job":
+		case key == "instance" && strings.Contains(base, strings.SplitN(value, ":", 2)[0]):
+		default:
+			kept = append(kept, pair)
+		}
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	return base + " — " + strings.Join(kept, ", ")
 }
 
 // metricAttachment builds one attachment for a single series: Now/Peak/Low/Average fields, a

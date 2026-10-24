@@ -180,3 +180,18 @@ func TestEncodeResultSizeIsBounded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, len(encoded), 64*1024)
 }
+
+func TestSeriesTitleDropsLabelsTheReaderDoesntNeed(t *testing.T) {
+	cases := []struct{ base, labels, want string }{
+		{"Load on www-1 (last hour)", "__name__=node_load1, instance=www-1, job=node", "Load on www-1 (last hour)"},
+		{"CPU on www-1 (last hour)", "instance=www-1:9100", "CPU on www-1 (last hour)"},
+		{"Network on www-1 (last hour)", "device=eth0, direction=rx, instance=www-1, job=node", "Network on www-1 (last hour) — device=eth0, direction=rx"},
+		{"up", "instance=api-2:9100, job=node", "up — instance=api-2:9100"},
+		{"Load", "value", "Load"},
+	}
+	for _, c := range cases {
+		if got := seriesTitle(c.base, seriesSummary{Labels: c.labels}); got != c.want {
+			t.Errorf("seriesTitle(%q, %q) = %q, want %q", c.base, c.labels, got, c.want)
+		}
+	}
+}
