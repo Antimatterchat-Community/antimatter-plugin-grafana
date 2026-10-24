@@ -33,7 +33,7 @@ func TestAIToolDefinitionsAreValid(t *testing.T) {
 			seen[d.Name] = true
 		})
 	}
-	assert.Len(t, seen, 5)
+	assert.Len(t, seen, 7)
 }
 
 // TestOnActivateRegistersValidTools checks that OnActivate calls RegisterAITools with exactly
@@ -42,7 +42,7 @@ func TestOnActivateRegistersValidTools(t *testing.T) {
 	api := &plugintest.API{}
 	defer api.AssertExpectations(t)
 	api.On("RegisterAITools", mock.MatchedBy(func(tools []*model.AIToolDefinition) bool {
-		if len(tools) != 5 {
+		if len(tools) != 7 {
 			return false
 		}
 		for _, tool := range tools {
@@ -317,4 +317,227 @@ func TestExecuteAIToolNeverLogsOrLeaksToken(t *testing.T) {
 			assert.NotContains(t, s, testToken)
 		}
 	}
+}
+
+// dsQueryBody decodes a /api/ds/query request body, once per request (http.Request.Body can only
+// be read once), for the host_metrics tests below.
+func dsQueryBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+	return body
+}
+
+// exprOf decodes a /api/ds/query request body and returns its first query's "expr", for the
+// host_metrics tests below to tell which query of a call (the metric itself, or the nodename
+// fallback probe) a given request is.
+func exprOf(t *testing.T, r *http.Request) string {
+	t.Helper()
+	queries := dsQueryBody(t, r)["queries"].([]any)
+	return queries[0].(map[string]any)["expr"].(string)
+}
+
+// TestExecuteAIToolHostMetrics checks that host_metrics builds its own PromQL (no expr argument
+// exists for this tool) and returns the same result shape as query_metrics, titled for the
+// person.
+func TestExecuteAIToolHostMetrics(t *testing.T) {
+	frame := dsQueryFrame(map[string]string{"instance": "www-1"}, []float64{0, 1000}, []float64{1.5, 2.5})
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		expr := exprOf(t, r)
+		assert.Contains(t, expr, "node_load1")
+		assert.Contains(t, expr, `instance=~"www-1(:[0-9]+)?"`)
+		resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{frame}}}}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "load"}))
+	require.Empty(t, result.Error)
+	assert.Contains(t, result.Text, "Load on www-1 (last hour)")
+	assert.Contains(t, result.Text, "last=2.5")
+	assert.Contains(t, result.Text, "min=1.5")
+	assert.Contains(t, result.Text, "max=2.5")
+	assert.Contains(t, result.Text, "points:")
+	assert.NotContains(t, result.Text, testToken)
+}
+
+// TestExecuteAIToolHostMetricsAliasesAndWindow checks a metric alias (ram) and an explicit time
+// range both reach the tool and its title.
+func TestExecuteAIToolHostMetricsAliasesAndWindow(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		body := dsQueryBody(t, r)
+		expr := body["queries"].([]any)[0].(map[string]any)["expr"].(string)
+		assert.Equal(t, "now-6h", body["from"])
+		if !strings.Contains(expr, "node_uname_info") {
+			// The main query, not the nodename fallback probe it triggers once this returns no
+			// data below.
+			assert.Contains(t, expr, "node_memory_MemAvailable_bytes")
+		}
+		resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{}}}}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "ram", "from": "now-6h"}))
+	require.Empty(t, result.Error)
+	assert.Contains(t, result.Text, "Memory on www-1 (last 6 hours)")
+	assert.Contains(t, result.Text, "no data")
+}
+
+func TestExecuteAIToolHostMetricsUnknownMetric(t *testing.T) {
+	env := newTestEnv(t, "http://unused.invalid", configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "bogus"}))
+	assert.NotEmpty(t, result.Error)
+}
+
+func TestExecuteAIToolHostMetricsRequiresHost(t *testing.T) {
+	env := newTestEnv(t, "http://unused.invalid", configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "", "metric": "cpu"}))
+	assert.NotEmpty(t, result.Error)
+}
+
+// TestExecuteAIToolHostMetricsNodenameFallback checks that when a host doesn't match the instance
+// label at all (here the person asked for "web1", node-exporter's own hostname, not how
+// Prometheus scrapes it), host_metrics resolves it via node_uname_info's nodename label to the
+// actual instance ("www-1:9100") and re-queries with that, rather than reporting no data.
+func TestExecuteAIToolHostMetricsNodenameFallback(t *testing.T) {
+	nodenameFrame := map[string]any{
+		"schema": map[string]any{"fields": []map[string]any{
+			{"name": "Value", "type": "number", "labels": map[string]string{"instance": "www-1:9100", "nodename": "web1"}},
+		}},
+		"data": map[string]any{"values": []any{[]json.Number{"0"}, []json.Number{"1"}}},
+	}
+	dataFrame := dsQueryFrame(map[string]string{"instance": "www-1:9100"}, []float64{0, 1000}, []float64{10, 20})
+
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		expr := exprOf(t, r)
+		var resp map[string]any
+		switch {
+		case strings.Contains(expr, "node_uname_info"):
+			assert.Contains(t, expr, `nodename=~"web1"`)
+			resp = map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{nodenameFrame}}}}
+		case strings.Contains(expr, `instance=~"web1(:[0-9]+)?"`):
+			// The first, direct attempt: nothing matches "web1" as an instance.
+			resp = map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{}}}}
+		case strings.Contains(expr, `instance=~"^(www-1:9100)$"`):
+			// The retry, with the instance resolved via nodename.
+			resp = map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{dataFrame}}}}
+		default:
+			t.Fatalf("unexpected expr: %s", expr)
+		}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "web1", "metric": "cpu"}))
+	require.Empty(t, result.Error)
+	assert.Contains(t, result.Text, "CPU on web1 (last hour)")
+	assert.Contains(t, result.Text, "last=20")
+}
+
+// TestExecuteAIToolHostMetricsJobFilter checks the configured job filter reaches the PromQL for
+// both the main query and the nodename fallback probe.
+func TestExecuteAIToolHostMetricsJobFilter(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		expr := exprOf(t, r)
+		assert.Contains(t, expr, `job="node"`)
+		resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{}}}}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true, JobFilter: "node"})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "load"}))
+	require.Empty(t, result.Error)
+	assert.Contains(t, result.Text, "no data")
+}
+
+// TestExecuteAIToolHostMetricsCustomInstanceLabel checks a non-default instance label setting
+// reaches the PromQL (and its "avg by (...)" grouping, for cpu).
+func TestExecuteAIToolHostMetricsCustomInstanceLabel(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		expr := exprOf(t, r)
+		if !strings.Contains(expr, "node_uname_info") {
+			// The main query, not the nodename fallback probe it triggers once this returns no
+			// data below.
+			assert.Contains(t, expr, `node_name=~"www-1(:[0-9]+)?"`)
+			assert.Contains(t, expr, "avg by (node_name)")
+		}
+		resp := map[string]any{"results": map[string]any{"A": map[string]any{"frames": []any{}}}}
+		encoded, _ := json.Marshal(resp)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true, InstanceLabel: "node_name"})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolHostMetrics, "u1", "c1", "", map[string]string{"host": "www-1", "metric": "cpu"}))
+	require.Empty(t, result.Error)
+}
+
+// TestExecuteAIToolListHosts checks list_hosts merges and dedupes the instance and nodename
+// labels' values into its "host" JSON result.
+func TestExecuteAIToolListHosts(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		var out map[string]any
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/label/instance/values"):
+			out = map[string]any{"status": "success", "data": []string{"www-1", "localhost:9090"}}
+		case strings.HasSuffix(r.URL.Path, "/label/nodename/values"):
+			out = map[string]any{"status": "success", "data": []string{"www-1"}}
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		encoded, _ := json.Marshal(out)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolListHosts, "u1", "c1", "", map[string]string{}))
+	require.Empty(t, result.Error)
+
+	var entries []struct {
+		Host string `json:"host"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.Text), &entries))
+	var hosts []string
+	for _, e := range entries {
+		hosts = append(hosts, e.Host)
+	}
+	assert.ElementsMatch(t, []string{"www-1", "localhost:9090"}, hosts)
+}
+
+// TestExecuteAIToolListHostsJobFilter checks the configured job filter is passed as the label
+// values call's match[] selector.
+func TestExecuteAIToolListHostsJobFilter(t *testing.T) {
+	fake := newGrafanaFake(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, `{job="node"}`, r.URL.Query().Get("match[]"))
+		out := map[string]any{"status": "success", "data": []string{}}
+		encoded, _ := json.Marshal(out)
+		_, _ = w.Write(encoded)
+	})
+	env := newTestEnv(t, fake.URL, configuration{AllCommunities: true, JobFilter: "node"})
+	env.allowChannel("u1", "c1", "")
+	env.expectLogs(nil)
+
+	result := env.p.ExecuteAITool(nil, toolExecution(toolListHosts, "u1", "c1", "", map[string]string{}))
+	require.Empty(t, result.Error)
+	assert.Equal(t, "[]", result.Text)
 }

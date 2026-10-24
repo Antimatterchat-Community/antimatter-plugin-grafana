@@ -23,6 +23,8 @@ const (
 	toolQueryMetrics     = "query_metrics"
 	toolPanelData        = "panel_data"
 	toolListAlerts       = "list_alerts"
+	toolHostMetrics      = "host_metrics"
+	toolListHosts        = "list_hosts"
 )
 
 // aiToolDefinitions declares this app's tools. All of them only read: none of them changes
@@ -108,6 +110,32 @@ func aiToolDefinitions() []*model.AIToolDefinition {
 				}
 			}`),
 		},
+		{
+			Name:  toolHostMetrics,
+			Title: "Host metrics",
+			Description: "Gives one host's CPU, memory, disk, load or network usage, from node-exporter metrics in Grafana's " +
+				"Prometheus datasource. Builds the query itself from node-exporter's own conventions: no PromQL needed. " +
+				"Returns the same kind of result as query_metrics (last, min, max, avg and downsampled points).",
+			Kind: model.AIToolKindRead,
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"host": {"type": "string", "description": "The host's name, such as \"www-1\": matched against Prometheus' instance label (exactly, or with a port) or node-exporter's nodename, whichever has data."},
+					"metric": {"type": "string", "description": "One of cpu, memory (or mem, ram), disk, load, network (or traffic)."},
+					"from": {"type": "string", "description": "Start of the time range, such as \"now-1h\" or \"now-6h\". Defaults to \"now-1h\"."},
+					"to": {"type": "string", "description": "End of the time range, such as \"now\". Defaults to \"now\"."}
+				},
+				"required": ["host", "metric"]
+			}`),
+		},
+		{
+			Name:  toolListHosts,
+			Title: "List hosts",
+			Description: "Lists the distinct host names Grafana's Prometheus datasource knows, from the instance and node-exporter " +
+				"nodename labels. Meant as a dictionary source for the assistant, so it learns host names; see the README.",
+			Kind:        model.AIToolKindRead,
+			InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
+		},
 	}
 }
 
@@ -151,6 +179,10 @@ func (p *Plugin) ExecuteAITool(_ *plugin.Context, call *model.AIToolExecution) *
 		text, err = handlePanelData(ctx, client, p.renderer, cfg, call.Arguments)
 	case toolListAlerts:
 		text, err = handleListAlerts(ctx, client, call.Arguments)
+	case toolHostMetrics:
+		text, err = handleHostMetrics(ctx, client, cfg, call.Arguments)
+	case toolListHosts:
+		text, err = handleListHosts(ctx, client, cfg)
 	default:
 		return &model.AIToolResult{Error: "Unknown Grafana tool."}
 	}

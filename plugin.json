@@ -1,7 +1,7 @@
 {
     "id": "com.antimatterchat.grafana",
     "name": "Grafana",
-    "description": "Gives the assistant and agents read-only tools to look up Grafana dashboards, metrics and alerts.",
+    "description": "Gives the assistant and agents read-only tools to look up Grafana dashboards, host metrics and alerts.",
     "homepage_url": "https://github.com/Antimatterchat-Community/antimatter-plugin-grafana",
     "support_url": "https://github.com/Antimatterchat-Community/antimatter-plugin-grafana/issues",
     "icon_path": "assets/icon.svg",
@@ -17,7 +17,7 @@
         "executable": ""
     },
     "settings_schema": {
-        "header": "Lets the assistant and agents look up Grafana dashboards, metrics and alerts. All tools are read-only: this app never changes anything in Grafana. There is no settings page in the app itself; everything is configured here.",
+        "header": "Lets the assistant and agents look up Grafana dashboards, metrics, host usage and alerts. All tools are read-only: this app never changes anything in Grafana. There is no settings page in the app itself; everything is configured here.",
         "footer": "",
         "settings": [
             {
@@ -49,7 +49,7 @@
                 "display_name": "Let every community use the Grafana tools",
                 "type": "bool",
                 "default": true,
-                "help_text": "When true, anyone in any community may use the search_dashboards, get_dashboard, query_metrics, panel_data and list_alerts tools, subject to their own Antimatter permissions. Turn this off to limit them to specific communities below."
+                "help_text": "When true, anyone in any community may use the search_dashboards, get_dashboard, query_metrics, panel_data, list_alerts, host_metrics and list_hosts tools, subject to their own Antimatter permissions. Turn this off to limit them to specific communities below."
             },
             {
                 "key": "AllowedCommunities",
@@ -58,6 +58,22 @@
                 "default": "",
                 "placeholder": "One community name or ID per line",
                 "help_text": "Only used when 'Let every community use the Grafana tools' is off. One community name (its URL name or display name) or ID per line. A tool call from any other community is refused, and so is a call from someone who isn't themselves a member of an allowed community."
+            },
+            {
+                "key": "InstanceLabel",
+                "display_name": "Instance label",
+                "type": "text",
+                "default": "instance",
+                "placeholder": "instance",
+                "help_text": "The Prometheus label host_metrics and list_hosts match a host name against; node-exporter's own convention, and the usual Prometheus relabelling target, is \"instance\". Only change this if your Prometheus labels scrape targets differently."
+            },
+            {
+                "key": "JobFilter",
+                "display_name": "Job filter (optional)",
+                "type": "text",
+                "default": "",
+                "placeholder": "Leave blank to match every job, such as \"node\" to match only node-exporter",
+                "help_text": "Restricts host_metrics and list_hosts to this Prometheus job, so a Prometheus that scrapes more than node-exporter doesn't mix other jobs' series into a host's metrics or the host dictionary. Leave blank to match any job."
             }
         ]
     }

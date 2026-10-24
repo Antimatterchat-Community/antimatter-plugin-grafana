@@ -40,6 +40,16 @@ type configuration struct {
 	// AllowedCommunities, when AllCommunities is false, lists the communities (one name or ID per
 	// line) whose members may use the Grafana tools. Ignored when AllCommunities is true.
 	AllowedCommunities string
+
+	// InstanceLabel is the Prometheus label host_metrics and list_hosts match a host name against
+	// (node-exporter's own convention is "instance", the target address). Defaults to "instance"
+	// when blank.
+	InstanceLabel string
+
+	// JobFilter, when set, restricts host_metrics and list_hosts to series of this job (such as
+	// "node"), so a Prometheus that scrapes more than node-exporter doesn't mix other jobs' series
+	// into a host's metrics or the host dictionary. Blank matches every job.
+	JobFilter string
 }
 
 // String redacts the service account token, so an accidental %v/%+v of the configuration (in a
@@ -53,8 +63,8 @@ func (c *configuration) String() string {
 		token = "<redacted>"
 	}
 	return fmt.Sprintf(
-		"configuration{GrafanaURL:%q GrafanaPublicURL:%q ServiceAccountToken:%q AllCommunities:%v AllowedCommunities:%q}",
-		c.GrafanaURL, c.GrafanaPublicURL, token, c.AllCommunities, c.AllowedCommunities,
+		"configuration{GrafanaURL:%q GrafanaPublicURL:%q ServiceAccountToken:%q AllCommunities:%v AllowedCommunities:%q InstanceLabel:%q JobFilter:%q}",
+		c.GrafanaURL, c.GrafanaPublicURL, token, c.AllCommunities, c.AllowedCommunities, c.InstanceLabel, c.JobFilter,
 	)
 }
 
@@ -70,6 +80,21 @@ func (c *configuration) publicURL() string {
 		return url
 	}
 	return c.grafanaURL()
+}
+
+// instanceLabel returns the Prometheus label host_metrics and list_hosts match a host against,
+// defaulting to "instance" (node-exporter's own convention) when blank.
+func (c *configuration) instanceLabel() string {
+	label := strings.TrimSpace(c.InstanceLabel)
+	if label == "" {
+		return "instance"
+	}
+	return label
+}
+
+// jobFilter returns the job this app's host tools are restricted to, or "" for every job.
+func (c *configuration) jobFilter() string {
+	return strings.TrimSpace(c.JobFilter)
 }
 
 // allowedCommunities parses AllowedCommunities into its trimmed, non-empty lines.

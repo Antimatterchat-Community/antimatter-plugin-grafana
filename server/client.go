@@ -359,6 +359,31 @@ func (c *grafanaClient) hasImageRenderer(ctx context.Context) bool {
 
 const imageRendererPluginID = "grafana-image-renderer"
 
+// labelValuesResponse is Prometheus' own shape for GET .../api/v1/label/:name/values, which
+// Grafana's datasource resource call (the same one Explore's own metric picker uses) passes
+// through unchanged.
+type labelValuesResponse struct {
+	Status string   `json:"status"`
+	Data   []string `json:"data"`
+}
+
+// labelValues lists the values a label takes, through Grafana's datasource resource call
+// (/api/datasources/uid/:uid/resources/...), the same route Explore's own label/metric picker
+// uses. match, when non-empty, is a PromQL selector (such as `{job="node"}`) that restricts which
+// series' labels are counted; empty considers every series.
+func (c *grafanaClient) labelValues(ctx context.Context, datasourceUID, label, match string) ([]string, error) {
+	var query url.Values
+	if match != "" {
+		query = url.Values{"match[]": {match}}
+	}
+	path := "/api/datasources/uid/" + url.PathEscape(datasourceUID) + "/resources/api/v1/label/" + url.PathEscape(label) + "/values"
+	var out labelValuesResponse
+	if err := c.do(ctx, "list_hosts", http.MethodGet, path, query, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Data, nil
+}
+
 // numberOr returns n as a float64, or fallback if n is empty or not a number.
 func numberOr(n json.Number, fallback float64) float64 {
 	if n == "" {

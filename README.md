@@ -20,11 +20,38 @@ AI tools, and everything it needs is configured in the System Console.
   (detected and cached for a few minutes); otherwise it says the image isn't available.
 - **list_alerts {state?}**: lists Grafana-managed alert rules and their current state (inactive,
   pending or firing), via Grafana's alerting API.
+- **host_metrics {host, metric, from?, to?}**: gives one host's CPU, memory, disk, load or network
+  usage, building the PromQL itself from node-exporter's own conventions, so nothing (a person or
+  the assistant's rules engine) needs to write PromQL just to ask "CPU on www-1". `metric` is one
+  of `cpu`, `memory` (or `mem`, `ram`), `disk`, `load`, `network` (or `traffic`). The host is
+  matched against the **instance label** (exactly, or with a `:<port>` suffix) or, if that finds
+  nothing, node-exporter's **nodename** label (`node_uname_info`), whichever has data; both label
+  names are configurable (below). Returns the same kind of result as `query_metrics` (each series'
+  last, min, max and avg, and up to 120 downsampled points), titled, for instance, "CPU on www-1
+  (last hour)".
+- **list_hosts {}**: lists the distinct values of the instance and nodename labels, through
+  Grafana's datasource resource call (the same route Explore's own label picker uses). Returns a
+  plain JSON array, such as `[{"host":"www-1"},{"host":"localhost:9090"}]`: meant to be read by the
+  assistant's dictionary (see below), not by a person.
 
-All five tools only read: none of them changes anything in Grafana. Each checks that the person
+All seven tools only read: none of them changes anything in Grafana. Each checks that the person
 behind the call may use the tools at all (their community is allowed by the setting below) and
 that they themselves can already see the channel or community they're asking from; it never
 answers with more than that.
+
+### Host name escaping (host_metrics, list_hosts)
+
+`host_metrics`' `host` argument (and the app's own job filter setting) end up inside a PromQL
+label matcher's string literal, such as `instance=~"<host>(:[0-9]+)?"`. A host containing `"` or a
+regex metacharacter (`.`, `(`, `{`, `|`, ...) must not be able to break out of that matcher, either
+to run arbitrary PromQL or to widen the regex match past the one host asked for. `server/hostmetrics.go`'s
+`escapeLabelValueForPromQL` handles both: it regex-escapes the value (`regexp.QuoteMeta`, which also
+escapes a literal backslash) and then escapes the result for the PromQL string literal itself
+(doubling every backslash, escaping every `"`), the same two-layer escaping Go's own `regexp.QuoteMeta`
+output needs when written into a Go string literal. `server/hostmetrics_test.go` checks this against
+real injection attempts (a value ending the string early, or trying to add an `or vector(1)` clause);
+it was also checked by hand against a live Prometheus (see the task report): the unescaped form breaks
+the query with a parse error, proving the injection, and the escaped form runs safely with no match.
 
 **Not yet (v0.1.0):** link previews for Grafana URLs pasted into a message. Planned as a
 follow-up.
@@ -47,6 +74,34 @@ itself.
   app and never written to a log.
 - **Let every community use the Grafana tools**: on by default. Turn it off and list specific
   communities (by name or ID, one per line) to limit the tools to them.
+- **Instance label**: the Prometheus label `host_metrics` and `list_hosts` match a host name
+  against. Defaults to `instance` (node-exporter's own convention). Only change this if your
+  Prometheus relabels scrape targets under a different label.
+- **Job filter** (optional): restricts `host_metrics` and `list_hosts` to one Prometheus job (such
+  as `node`), so a Prometheus that scrapes more than node-exporter doesn't mix other jobs' series
+  into a host's metrics or the host dictionary. Blank (the default) matches every job.
+
+## Teaching the assistant host names (DictionarySources)
+
+The assistant's rules engine has a built-in "resource usage" pattern ("cpu|memory|disk|load on
+{host}") that picks a tool named `*host_metrics*` and fills its `host`/`metric` arguments from
+whatever it recognises in the message. For it to recognise a host name at all, that name has to be
+in the assistant's dictionary, built from each community's **Assistant** settings
+`DictionarySources`: a JSON list of `{tool, type, field}` entries, each naming a read-only tool
+whose result is scanned for every string under a key named `field`, added to the dictionary as an
+entity of `type`.
+
+`list_hosts`' plain `[{"host": "..."}, ...]` result is built for exactly this: set `DictionarySources`
+to (this also keeps this app's own built-in dashboard and datasource sources, since setting
+`DictionarySources` at all replaces the built-in list rather than adding to it):
+
+```json
+[
+  {"tool": "*search_dashboards", "type": "dashboard", "field": "title"},
+  {"tool": "*list_datasources", "type": "service", "field": "name"},
+  {"tool": "*list_hosts", "type": "host", "field": "host"}
+]
+```
 
 ## How it works
 
@@ -59,6 +114,10 @@ itself.
   dispatches to a handler per tool.
 - `server/format.go` turns a `/api/ds/query` result into the label summary, stats and downsampled
   points every tool shares.
+- `server/hostmetrics.go` builds `host_metrics`' PromQL from node-exporter conventions (with the
+  host escaped against PromQL injection and regex widening), resolves a host to its instance label
+  via nodename when the instance label alone finds nothing, and lists `list_hosts`' host names
+  through Grafana's datasource resource call.
 - `server/renderer.go` caches whether `grafana-image-renderer` is installed, so `panel_data` isn't
   checking on every call.
 
