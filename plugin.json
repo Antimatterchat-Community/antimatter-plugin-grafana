@@ -1,0 +1,64 @@
+{
+    "id": "com.antimatterchat.grafana",
+    "name": "Grafana",
+    "description": "Gives the assistant and agents read-only tools to look up Grafana dashboards, metrics and alerts.",
+    "homepage_url": "https://github.com/antimatterchat/antimatter-plugin-grafana",
+    "support_url": "https://github.com/antimatterchat/antimatter-plugin-grafana/issues",
+    "icon_path": "assets/icon.svg",
+    "min_server_version": "11.11.0",
+    "server": {
+        "executables": {
+            "darwin-amd64": "server/dist/plugin-darwin-amd64",
+            "darwin-arm64": "server/dist/plugin-darwin-arm64",
+            "linux-amd64": "server/dist/plugin-linux-amd64",
+            "linux-arm64": "server/dist/plugin-linux-arm64",
+            "windows-amd64": "server/dist/plugin-windows-amd64.exe"
+        },
+        "executable": ""
+    },
+    "settings_schema": {
+        "header": "Lets the assistant and agents look up Grafana dashboards, metrics and alerts. All tools are read-only: this app never changes anything in Grafana. There is no settings page in the app itself; everything is configured here.",
+        "footer": "",
+        "settings": [
+            {
+                "key": "GrafanaURL",
+                "display_name": "Grafana URL",
+                "type": "text",
+                "default": "",
+                "placeholder": "https://grafana.example.com",
+                "help_text": "The URL this server uses to reach Grafana. Required for the Grafana tools to work. Grafana is usually on your internal network, so unlike some other apps, private addresses are allowed here; connections to link-local and cloud metadata addresses are still refused."
+            },
+            {
+                "key": "GrafanaPublicURL",
+                "display_name": "Public Grafana URL (optional)",
+                "type": "text",
+                "default": "",
+                "placeholder": "Leave blank to reuse the Grafana URL above",
+                "help_text": "Only needed when members' browsers reach Grafana at a different address than this server does, such as when the server uses an internal hostname. Used for the dashboard and Explore links in tool results; never used for the requests themselves."
+            },
+            {
+                "key": "ServiceAccountToken",
+                "display_name": "Service account token",
+                "type": "text",
+                "secret": true,
+                "default": "",
+                "help_text": "A Grafana service account token. Viewer rights are enough: this app only reads dashboards, metrics and alerts, and never changes anything in Grafana. Stored encrypted by the server; never sent to the web app and never written to a log."
+            },
+            {
+                "key": "AllCommunities",
+                "display_name": "Let every community use the Grafana tools",
+                "type": "bool",
+                "default": true,
+                "help_text": "When true, anyone in any community may use the search_dashboards, get_dashboard, query_metrics, panel_data and list_alerts tools, subject to their own Antimatter permissions. Turn this off to limit them to specific communities below."
+            },
+            {
+                "key": "AllowedCommunities",
+                "display_name": "Communities that may use them",
+                "type": "longtext",
+                "default": "",
+                "placeholder": "One community name or ID per line",
+                "help_text": "Only used when 'Let every community use the Grafana tools' is off. One community name (its URL name or display name) or ID per line. A tool call from any other community is refused, and so is a call from someone who isn't themselves a member of an allowed community."
+            }
+        ]
+    }
+}

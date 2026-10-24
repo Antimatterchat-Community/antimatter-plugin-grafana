@@ -1,0 +1,72 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - bidichk
+    - bodyclose
+    - errcheck
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - misspell
+    - modernize
+    - nakedret
+    - revive
+    - staticcheck
+    - unconvert
+    - unqueryvet
+    - unused
+    - whitespace
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+    unqueryvet:
+      check-sql-builders: true
+  exclusions:
+    paths:
+      - webapp/node_modules
+      # build/ is copied, generic plugin tooling (see NOTICE.txt), not this app's own code.
+      - build/
+    rules:
+      - path: server/configuration.go
+        linters:
+          - unused
+      - path: _test\.go
+        linters:
+          - bodyclose
+          # Test doubles deliberately echo back a fake token and use fixed strings, which gosec's
+          # taint analysis mistakes for XSS/hardcoded-credential findings.
+          - gosec
+      - path: server/manifest\.go
+        linters:
+          - unused
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+      rewrite-rules:
+        - pattern: interface{}
+          replacement: any
+    goimports:
+      local-prefixes:
+        - github.com/antimatterchat/antimatter-plugin-grafana
